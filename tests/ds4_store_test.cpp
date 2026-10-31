@@ -551,6 +551,73 @@ void test_put(const Model& m) {
     }
 }
 
+// layers of two sizes: each size has slots of its own, as many a layer, so the budget holds more experts than slots of
+// the largest size would; an expert gives way to one of its own size; preload goes past a size that is full
+void test_classes(const Model& m) {
+    const uint64_t G = 1ull << 30;
+    std::vector<ExpertStore::Geo> geo(m.geo.begin(), m.geo.begin() + 3);
+    for (int r = 0; r < 3; ++r) geo[1].bytes[r] = kBytes[r] / 2;
+    const size_t big = ExpertStore::slot_layout({geo[0]}), small = ExpertStore::slot_layout({geo[1]});
+    EXPECT(small < big && ExpertStore::slot_layout(geo) == big);
+    std::atomic<uint64_t> avail{100 * G};
+    ExpertStore::Cfg c;
+    c.budget = 6 * (2 * big + small);   // (6 slots a layer)
+    c.chunk_slots = 2;
+    c.readers = 4;
+    c.ram_avail = [&] { return avail.load(); };
+    std::string err;
+    ExpertStore st;
+    EXPECT(st.init(c, geo, m.files, err));
+    EXPECT(st.slots_max() == 18);
+    EXPECT(st.slots_max() > c.budget / big);
+    EXPECT(st.bytes_max() == c.budget);
+    EXPECT(st.slot_bytes() == big);
+
+    const auto check = [&](int l, int e, const uint8_t* p, int r) {
+        const ExpertStore::Geo& g = geo[(size_t) l];
+        const uint64_t off = g.off[r] + (uint64_t) e * g.stride[r];
+        EXPECT(((uintptr_t) p) % 4096 == off % 4096);
+        bool eq = true;
+        for (uint64_t i = 0; i < g.bytes[r]; ++i) eq = eq && p[i] == byte_at(g.file[r], off + i);
+        EXPECT(eq);
+    };
+    const auto take = [&](int l, const std::vector<int>& es) {
+        ExpertStore::Hold h;
+        st.begin(l, es.data(), (int) es.size(), h);
+        std::vector<int> out;
+        while (st.next(h, out, true))
+            for (int i : out)
+                if (h.st[(size_t) i] == ExpertStore::kHit)
+                    for (int r = 0; r < 3; ++r) check(l, h.e[(size_t) i], st.mat(h, i, r), r);
+        st.release(h);
+    };
+    take(0, {0});
+    for (int e = 0; e < 8; ++e) take(1, {e});   // (two more than the small slots: its own oldest give way)
+    EXPECT(st.has(0, 0));
+    EXPECT(!st.has(1, 0) && !st.has(1, 1) && st.has(1, 7));
+    take(2, {3});
+    int s = st.acquire(1, 7);
+    EXPECT(s >= 0);
+    if (s >= 0) {
+        for (int r = 0; r < 3; ++r) check(1, 7, st.mat_of(s, r), r);
+        st.unpin(s);
+    }
+
+    ExpertStore st2;
+    EXPECT(st2.init(c, geo, m.files, err));
+    std::vector<std::pair<int, int>> list;
+    for (int e = 0; e < kExp; ++e) list.push_back({1, e});   // (the small slots fill first)
+    for (int e = 0; e < kExp; ++e) list.push_back({0, e});
+    EXPECT(st2.preload(list, 0) == 14);
+    EXPECT(st2.held() == 14);
+    EXPECT(st2.has(0, 7) && st2.has(1, 5) && !st2.has(1, 6));
+
+    avail = 3 * G;   // (below the 4 GB floor: every chunk of every size goes)
+    EXPECT(st2.watch() > 0);
+    EXPECT(st2.slots_now() == 0 && st2.held() == 0);
+    EXPECT(!st2.has(0, 0) && !st2.has(1, 0));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -574,6 +641,7 @@ int main(int argc, char** argv) {
     test_shrink(m);
     test_split(m);
     test_put(m);
+    test_classes(m);
     if (failures == 0) std::fprintf(stderr, "ds4_store_test: ALL OK\n");
     else std::fprintf(stderr, "ds4_store_test: %d FAILED\n", failures);
     return failures == 0 ? 0 : 1;
