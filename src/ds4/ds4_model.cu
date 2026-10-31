@@ -7323,6 +7323,7 @@ struct Model::Impl {
         if (const char* v = ds4_env("DS4_STORE_POLICY"))   // (beside the flag's default)
             if (o.ssd_policy == 0 && std::string(v) == "lfu") c.policy = ExpertStore::kLfu;
         c.readers = std::max(1, std::min(64, (int) store_env("DS4_STORE_THREADS", 8.0)));
+        c.guess_readers = std::max(0, (int) store_env("DS4_STORE_GUESS_READERS", 0.0));
 #if defined(_WIN32)
         c.unbuffered = store_env("DS4_STORE_UNBUFFERED", 0.0) != 0;   // (Windows: the buffered handles by default)
 #endif
