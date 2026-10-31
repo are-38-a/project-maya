@@ -7345,7 +7345,8 @@ struct Model::Impl {
         store_flow = store_env("DS4_STORE_FLOW", 1.0) != 0;
         std::fprintf(stderr, "ds4: RAM store (--ssd-cache): up to %zu experts in slots of %.1f MB (%.1f GB; the CPU lane "
                              "reads %zu in place), %s, %d readers, %s; below %.1f GB of free RAM it gives RAM back\n",
-                     store->slots_max(), sb / 1e6, store->slots_max() * (double) sb / 1e9, lane,
+                     store->slots_max(), (double) store->bytes_max() / (double) store->slots_max() / 1e6,
+                     store->bytes_max() / 1e9, lane,
                      c.policy == ExpertStore::kLfu ? "lfu" : "lru", c.readers,
                      direct ? "reads past the page cache" : "reads through the page cache (no unbuffered handle)",
                      c.floor / 1e9);
