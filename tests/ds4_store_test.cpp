@@ -551,6 +551,32 @@ void test_put(const Model& m) {
     }
 }
 
+// guess_readers: the lookahead's reads take that many readers at most, so a demand read always finds one free
+void test_guess_cap(const Model& m) {
+    Gate gate;
+    ExpertStore::Cfg c;
+    c.budget = 16 * ExpertStore::slot_layout(m.geo);
+    c.chunk_slots = 4;
+    c.readers = 3;
+    c.guess_readers = 1;
+    c.before_read = [&](const ExpertStore::ReadNote& n) { gate.hook(n); };
+    std::string err;
+    ExpertStore st;
+    EXPECT(st.init(c, m.geo, m.files, err));
+    gate.close(0, 0);
+    gate.close(0, 1);
+    EXPECT(st.guess(0, 0));
+    EXPECT(st.guess(0, 1));
+    EXPECT(wait_for([&] { return gate.count() >= 1; }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT(gate.count() == 1);   // (one reader on a guess, the others idle though guesses wait)
+    ask(st, m, 1, {0});          // (a demand read goes past it)
+    EXPECT(st.has(1, 0));
+    gate.open(0, 0);
+    gate.open(0, 1);
+    EXPECT(wait_for([&] { return st.has(0, 0) && st.has(0, 1); }));
+}
+
 // layers of two sizes: each size has slots of its own, as many a layer, so the budget holds more experts than slots of
 // the largest size would; an expert gives way to one of its own size; preload goes past a size that is full
 void test_classes(const Model& m) {
@@ -642,6 +668,7 @@ int main(int argc, char** argv) {
     test_split(m);
     test_put(m);
     test_classes(m);
+    test_guess_cap(m);
     if (failures == 0) std::fprintf(stderr, "ds4_store_test: ALL OK\n");
     else std::fprintf(stderr, "ds4_store_test: %d FAILED\n", failures);
     return failures == 0 ? 0 : 1;

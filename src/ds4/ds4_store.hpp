@@ -78,6 +78,7 @@ public:
         size_t chunk_slots = 32;               // slots a chunk (the unit of growing and of giving back)
         Policy policy = kLru;
         int readers = 8;                       // reading threads
+        int guess_readers = 0;                 // of them, on a guess at most (0: any)
         float decay = 0.9f;                    // lfu: a layer's heats x decay every `decay_every` asks of the layer
         int decay_every = 256;
         // (Windows) each reader its own FILE_FLAG_NO_BUFFERING handles (os::open_unbuffered) - Windows' unbuffered
@@ -841,17 +842,30 @@ private:
             Job j;
             {
                 std::unique_lock<std::mutex> lk(q_mu_);
-                q_cv_.wait(lk, [&] { return quit_ || !demand_q_.empty() || !guess_q_.empty(); });
+                const auto guess_ok = [&] {
+                    return !guess_q_.empty() && (cfg_.guess_readers <= 0 || guess_busy_ < cfg_.guess_readers);
+                };
+                q_cv_.wait(lk, [&] { return quit_ || !demand_q_.empty() || guess_ok(); });
                 if (quit_) break;
-                std::deque<Job>& q = !demand_q_.empty() ? demand_q_ : guess_q_;
+                const bool demand = !demand_q_.empty();
+                std::deque<Job>& q = demand ? demand_q_ : guess_q_;
                 j = q.front();
                 q.pop_front();
+                if (!demand) ++guess_busy_;
+                j.guess = !demand;
             }
             if (cfg_.before_read) cfg_.before_read(ReadNote{j.layer, j.e, j.r, j.guess, j.dst, j.off, j.len});
             const bool ok = read(j, own, tried);
             Slot& sp = slots_[(size_t) j.slot];
             if (!ok) sp.bad.store(true, std::memory_order_release);
             sp.left.fetch_sub(1, std::memory_order_acq_rel);
+            if (j.guess) {
+                {
+                    std::lock_guard<std::mutex> lk(q_mu_);
+                    --guess_busy_;
+                }
+                q_cv_.notify_all();
+            }
             landed();
         }
         for (os::fd_t f : own) os::close_fd(f);
@@ -872,6 +886,7 @@ private:
     std::mutex q_mu_;
     std::condition_variable q_cv_;
     std::deque<Job> demand_q_, guess_q_;
+    int guess_busy_ = 0;   // (q_mu_) readers on a guess
     bool quit_ = false;
     std::mutex done_mu_;
     std::condition_variable done_cv_;
